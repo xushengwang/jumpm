@@ -1,0 +1,54 @@
+## Parameter file for JUMPm
+## version 0.15, Date: 10/19/2015 
+
+labeled_data = 1                                                                           # 1 = labeled data; 0 = unlabeled data
+labeled_ID_method = 2                                                                      # if labeled_data = 1, then 1 = mass only; 2= MISSILE combined with #C and #N; 3 = MISSILE combined with #C; 4=MISSILE combined with N# 
+
+## Database settings
+database = pubchem                                                                         # database type: pubchem, kegg, hmdb
+mass_formula_database = /home/xwang4/JUMPm_database/Index_20151012_NoClBrF                 # mass formula database   
+structure_database = /home/tshaw/PUBCHEM_STRUCTURE_DB/PUBCHEM_INDEXED                      # structure database
+
+## mass tolerance for matching between mono mass (C12) and formula
+formula_mass_tolerance_searching = 10                                                      # mass tolerance for database search
+formula_mass_tolerance_pairing = 5                                                         # use it for the first round of search to estimate label mixing ratio
+
+
+## parameters for isotopic peirs
+c12_c13_tolerance = 0.002                                                                  # tolerance between C12 and C15; unit in Da 
+c12_n15_tolerance = 0.0045                                                                 # tolerance between C12 and C15; unit in Da 
+relative_isotopes_intensity = 0.1                                                          # minimal relative intensity between paired isotopes
+min_pair_correlation = 0.2                                                                 # minimal pairing correlation coefficient
+cluster_tolerance = 20                                                                     # from version 0.1.5 change ppm into cluster_tolerance (tolerance for clustering step) 
+
+## Preprocessing parameters
+first_scan_extraction = 0                                                                  # the first scan used for search
+last_scan_extraction = 1000000                                                             # the last scan used for search
+isolation_window = 1                                                                       # isolation window size 1= +/-0.5
+mass_correction = 1                                                                        # 0 = no correction, 1 = MS1-based
+## MS1 deisotoping
+interscanppm = 30                                                                          # tolerance for interscan precursor identification
+decharge_ppm = 30                                                                          # intrascan isotopic tolerance for decharging
+deisotope_ppm = 30                                                                         # intrascan isotopic tolerance for decharging
+
+MS2_deisotope = 0                                                                          # 0 = disable; 1 = enable
+percentage_MS2_peaks = 50                                                                  # number of MS2 peaks used for matching 
+frag_mass_tolerance = 0.02                                                                 # mass tolerance for MS2 ion matching
+frag_mass_tolerance_unit = 1                                                               # 1 = Da; 2 = PPM;
+matched_scan_dist = 10                                                                     # scan number between MS2 and MS1 containing MS2 precursor matched MISSILE pairs
+matched_MS2prec_formula = 10                                                               # mass tolerance (ppm) between MS2 and MS1 containing MS2 precursor matched MISSILE pairs
+mass_shift = 0
+
+## 3D generation 
+intensityThreshold2D = 100000                                                              # minimum 2D peak intensity
+intensityThresholdScale2D = 1                                                              # 1. Absolute intensity threshold for 2D-peaks; 2.  Relative intensity threshold for 2D-peaks
+scanWindow = 2                                                                             # The number of neighboring (MS1) scans for 3D-peak generation (should be > 1)
+matchPpm = 10                                                                              # The tolerance of mass difference (ppm)
+noisePercentage2D = 10                                                                     # In each (2D) scan, intensities smaller than (noisePercentage2D * median of all intensities in the scan)/100 will be ignored (i.e. filtered)
+noisePercentage3D = 100                                                                    # For 3D-peaks, intensities smaller than (noisePercentage3D * median of all intensities of 3D-peaks)/100 will be ignored (i.e. filtered)
+numCentroidPoints = 3                                                                      # The number of raw data points for calculating centroid m/z
+valleyFactor = 10                                                                          # The threshold value for splitting a 3D-peak
+
+## files used for metFrag program
+neutralLossFile = /home/xwang4/JUMPm_database/neutralLoss.csv 
+bondEnergyFile = /home/xwang4/JUMPm_database/bondenergies.txt
