@@ -1,0 +1,924 @@
+#!/usr/bin/perl  
+
+use FindBin qw($Bin);
+use lib "$Bin";
+use Getopt::Long;
+use Cwd;
+use Cwd 'abs_path';
+use Storable;
+use File::Basename;
+use Spiders::Dta;
+use Spiders::Params;
+use Spiders::ProcessingRAW;
+use Spiders::ProcessingMzXML;
+use Spiders::Job;
+use Spiders::Path;
+use Parallel::ForkManager;
+use Spiders::PeakDetection;
+use Spiders::Decharge;
+use Spiders::MS2_scoring;
+use Spiders::MassCorrection;
+use Spiders::MathUtils;
+
+
+my $library = $Bin;
+my $VERSION = 0.1.5;
+
+my $progname = $0;
+$progname =~ s@(.*)/@@i;
+
+my ($help,$parameter,$raw_file);
+GetOptions('-help|h'=>\$help,
+			'-p=s'=>\$parameter,
+		);
+
+usage() if ($help || !defined($parameter));
+open(LOG,">JUMPm.log");
+
+print "\n\n  Initializing jump program\n\n";
+print LOG "\n\n  Initializing jump program\n\n";
+my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst)=localtime(time); 
+
+
+my $p = Spiders::Params->new('-path'=>$parameter);
+my $params=$p->parse_param();
+$params->{'cluster'} = 1;
+$params->{'Job_Management_System'} = SGE;
+
+## Create the path for multiple raw files
+my %rawfile_hash;
+print "  Using the following rawfiles:\n";
+print LOG "  Using the following rawfiles:\n";
+foreach $arg (sort @ARGV)
+{
+    my @suffixlist=();
+    push @suffixlist,".raw";
+    push @suffixlist,".RAW";
+    push @suffixlist,".mzXML";
+
+    if($arg=~/.[raw|RAW|mzXML]/)
+    {
+		print "  $arg","\n";
+	}
+}
+
+foreach $arg (sort @ARGV)
+{
+    my @suffixlist=();
+    push @suffixlist,".raw";
+    push @suffixlist,".RAW";
+    push @suffixlist,".mzXML";
+    if($arg=~/.[raw|RAW|mzXML]/)
+    {	
+		my ($filename, $directory, $suffix) = fileparse($arg,@suffixlist);	
+        system(qq(mkdir $directory/$filename >/dev/null 2>&1));
+        system(qq(mv $arg $directory/$filename >/dev/null 2>&1));
+        my $datafile = "$directory/$filename";
+        my $path = new Spiders::Path($datafile);
+
+
+        my $list = $path->make_directory_list();
+        if(@$list)
+        {
+            $newdir = $path->choose_dir_entry($list,"  Choose a .out file directory",$newdir);
+        }
+        else
+        {
+			$newdir	= $filename . ".1";
+          #  $newdir = $path->ask("  Choose a .out file directory",$newdir);
+        }
+        print "  Using: $newdir\n";
+        print LOG "  Using: $newdir\n";		
+        $path->add_subdir($newdir);
+        my $dir =  $path->basedir() . "/$newdir";
+		my $rawfile = "$datafile/$arg";
+		$rawfile_hash{$rawfile} = $dir; 
+    }
+}
+
+
+
+foreach my $raw_file(sort keys %rawfile_hash)
+{		
+# 
+
+###### Get working directory #####################
+	print "\n  Searching data: $raw_file\n";
+	print LOG "\n  Searching data: $raw_file\n";	
+	my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst)=localtime(time); 
+	print "  Start: ";
+	print LOG "  Start: ";	
+	printf "%4d-%02d-%02d %02d:%02d:%02d\n",$year+1900,$mon+1,$mday,$hour,$min,$sec;	
+	printf LOG "%4d-%02d-%02d %02d:%02d:%02d\n",$year+1900,$mon+1,$mday,$hour,$min,$sec;	
+	
+	my $curr_dir = getcwd;
+	my $dta_path = $rawfile_hash{$raw_file};
+	  
+	if($raw_file =~/\.mzXML/)
+	{
+		$raw_file =~s/\.mzXML//g;
+	}
+
+######### output file ##################################
+	open(OUTPUT,">$dta_path.summary") || die "can not open the summary file"; 	
+	open(OUTPUTBEST,">$dta_path.best_hit") || die "can not open the summary file";
+	print OUTPUT "MS1 scan\tC12 mass\tN15 mass\tC13 mass\tFormula\tMS2 scan\tIUPAC\tSMILES\tMscore\n";
+	print OUTPUTBEST "MS1 scan\tC12 mass\tN15 mass\tC13 mass\tFormula\tMS2 scan\tIUPAC\tSMILES\tMscore\n";	
+######### programming starting information #############
+
+	my $proc_raw = new Spiders::ProcessingRAW();
+	$proc_raw->set_raw_file($raw_file);
+
+###################### window part ##########################
+	print "  Converting .raw into .mzXML file\n";
+	print LOG "  Converting .raw into .mzXML file\n";
+	
+	my $mzXML = $proc_raw->raw2mzXML();
+
+	print "  Extracting MS1 and MS2 peaks from .mzXML\n";
+	print LOG "  Extracting MS1 and MS2 peaks from .mzXML\n";	
+	my $proc_xml = new Spiders::ProcessingMzXML();
+	$proc_xml ->set_dta_path($dta_path);
+
+	$proc_xml ->set_mzXML_file($mzXML);
+
+################### preprocessing #########################
+	my (%ms_hash,%msms_hash,@mz_array);
+
+	$proc_xml->set_parameter($params);
+	$proc_xml->generate_hash_dta(\%ms_hash, \%msms_hash, \@mz_array, $params);
+	my $ms1N = scalar(keys %{$ms_hash{'surveyhash'}});
+	my $ms2N = scalar(keys %msms_hash)-scalar(keys %{$ms_hash{'surveyhash'}});
+	
+	printf("\n  There are %d MS and %d MS/MS in the entire run\n", $ms1N , $ms2N);
+	printf LOG ("\n  There are %d MS and %d MS/MS in the entire run\n", $ms1N , $ms2N);	
+	print "\n\n  Mass correction\n";
+	print LOG "\n\n  Mass correction\n";	
+	my $masscorr = new Spiders::MassCorrection();
+	my ($msms_hash_corrected,$mz_array_corrected,$meanMassShift, $stdMassShift) = $masscorr->massCorrection(\%ms_hash, \%msms_hash, \@mz_array, $params);
+	printf LOG ("  Calculated mass-shift: mean = %.5f ppm and SD = %.5f ppm\n", $meanMassShift, $stdMassShift); 
+	%msms_hash = %$msms_hash_corrected;
+	@mz_array = @$mz_array_corrected;	
+	
+	
+	my $decharge = new Spiders::Decharge();
+	$decharge->set_parameter($params);
+	$decharge->decharge(\%ms_hash, \%msms_hash, \@mz_array);
+	
+	
+	print "\n\n  feature detection\n";
+	print LOG "\n\n  feature detection\n";	
+
+	my $peakdetection = new Spiders::PeakDetection();
+	$peakdetection->Gen_3Dpeaks($params,$mzXML,$dta_path); 
+
+	print "  Generating MISSILES for each scan\n";
+	print LOG "  Generating MISSILES for each scan\n";		
+	my @dtafiles = glob("$dta_path/*.MS1");
+	my $dta=new Spiders::Dta; 
+	
+	my $job = new Spiders::Job;
+	$job->set_library_path($library);		
+	$job->set_dta_path($dta_path);
+	
+	if($params->{'labeled_data'})
+	{
+		print "  You are searching a labeled data set\n";
+		print LOG "  You are searching a labeled data set\n";		
+		$job->create_pscript;
+		my $random = int(rand(100));
+		my $ratio;
+		my $defect;
+		$ratio->{'NC'} = 0;
+		$ratio->{'CC'} = 0;
+		print "  Estimating the labeling mix ratio (it takes time and please be patient!)\n";
+		print LOG "  Estimating the labeling mix ratio (it takes time and please be patient!)\n";		
+		runjobs(\@dtafiles,$dta_path,"pair_${random}",$ratio,$defect);		
+		($ratio,$defect) = calculate_intensity_ratio($dta_path);
+		print "  Intensity ratio between N15 and C12 is $ratio->{'NC'} \n";
+		print "  Intensity ratio between C13 and C12 is $ratio->{'CC'} \n";
+		print LOG "  Intensity ratio between N15 and C12 is $ratio->{'NC'} \n";
+		print LOG "  Intensity ratio between C13 and C12 is $ratio->{'CC'} \n";
+		print "  Mass defect between N15 and C12 is $defect->{'NC'} \n";
+		print "  Mass defect between C13 and C12 is $defect->{'CC'} \n";
+
+		
+		print "  Searching database (it takes time and please be patient!)\n";
+		print LOG "  Searching database (it takes time and please be patient!)\n";				
+		$job->create_mscript;
+		$random = int(rand(100));
+		runjobs(\@dtafiles,$dta_path,"sch_${random}",$ratio,$defect);
+	}
+	else	
+	{
+	
+		print "  Searching database (it takes time and please be patient!)\n";		
+		print LOG "  Searching database (it takes time and please be patient!)\n";			
+		$job->create_mscript_unlabel;
+		$random = int(rand(100));
+		my $ratio=0;
+		runjobs(\@dtafiles,$dta_path,"sch_${random}",$ratio);		
+	}
+	
+	print "\n  Summarizing missile results\n";
+	print LOG "\n  Summarizing missile results\n";	
+	my $ms_hash_mol = summary($dta_path);
+	my $missile_scan = scalar keys (%$ms_hash_mol);
+	print "\n  $missile_scan MS1 scans generate MISSILES\n";
+	print LOG "\n  $missile_scan MS1 scans generate MISSILES\n";
+	
+
+exit;
+
+
+	
+	print "  Performing MS2 matching and scoring\n";
+	print LOG "  Performing MS2 matching and scoring\n";	
+	my $count = 0;
+	my $MS1_MS2_matched;
+	
+	foreach my $scan (sort {$a<=>$b} keys %msms_hash)
+	{
+
+		print "\r  processing MS2 scan: $scan";
+		print LOG "\r  processing MS2 scan: $scan";		
+		my $ms_prec_mh = $msms_hash{$scan}{'prec_MH'};
+		
+		foreach my $scan_missile (keys %$ms_hash_mol)
+		{
+		
+			next if($scan < ($scan_missile-$params->{'matched_scan_dist'} ) or $scan > ($scan_missile+$params->{'matched_scan_dist'}));
+			next if(!defined($ms_hash_mol->{$scan_missile}));
+			
+			foreach my $mz_missile (keys %{$ms_hash_mol->{$scan_missile}})
+			{
+
+				my $i=0;
+				my $mz_int = int($mz_missile);
+
+				if(abs($mz_missile-$ms_prec_mh)<$params->{'matched_MS2prec_formula'})
+				{
+					open(JOB,">$dta_path/frag_${scan}_${mz_int}.sh") || die "can not open the job files\n";
+					print JOB "#!/bin/bash\n";
+					print JOB "#\$ -N frag_${scan}_${mz_int}\n";
+					print JOB "#\$ -e frag_${scan}_${mz_int}.e\n";
+					print JOB "#\$ -o frag_${scan}_${mz_int}.o\n";
+
+					foreach my $smile (keys %{$ms_hash_mol->{$scan_missile}->{$mz_missile}})
+					{
+
+						$MS1_MS2_matched->{$scan_missile}->{$mz_missile} = $scan; 
+						my ($prec_type) = keys %{$ms_hash_mol->{$scan_missile}->{$mz_missile}->{$smile}};
+						$smile =~s/\(/\\\(/g;
+						$smile =~s/\)/\\\)/g;
+						$smile ="\"" . $smile . "\"";
+
+						my $abs_param_path = abs_path($parameter);
+						print JOB  "perl $library/frag_shell.pl -dtafile $dta_path/${scan}.MS2  -smile $smile -mass 50 -depth 2 -param  $abs_param_path -ptype $prec_type\n";
+						$i++;
+																								
+					}
+					close(JOB);
+				}
+				if($i>0 and ($params->{'cluster'} eq '1'))
+				{
+					my $command_line = qq(cd $dta_path && qsub -cwd frag_${scan}_${mz_int}.sh);
+					my $job=qx[$command_line];
+					chomp $job;
+					my $job_id=0;
+					if($job=~/$job_name \<(\d*)\> is/)
+					{
+						$job_id=$1;
+					}
+					$job_list->{$job_id}=1;
+					$count++;
+				}
+				if($i>0 and ($params->{'cluster'} eq '0'))
+				{
+###################### Need more codes ##################
+				}
+				
+			}
+		}		
+	}
+	print "\n  $count jobs were submitted\n";	
+	print LOG "  $count jobs were submitted\n";		
+	Check_Job_stat("frag_",$count,$dta_path);	
+
+	print "\n\n  Summarizing finial results\n\n";
+	print LOG "\n\n  Summarizing finial results\n\n";	
+######## Finally summary #############
+	my $missile_structure = 0;
+	
+	foreach my $scan_missile (sort {$a<=>$b} keys %$ms_hash_mol)
+	{
+		foreach my $mz_missile (keys %{$ms_hash_mol->{$scan_missile}})
+		{
+
+			my $besthit = 1;
+			if($MS1_MS2_matched->{$scan_missile}->{$mz_missile})
+			{
+
+				
+				my $MS2_scan = $MS1_MS2_matched->{$scan_missile}->{$mz_missile};
+				my $score_file = $MS2_scan . ".MS2.score";
+				open(SCORE,"$dta_path/$score_file");
+				my %score_hash;
+				
+				while(<SCORE>)
+				{
+					chomp $_;
+					my @lines = split(/\t/,$_);
+					$lines[1]=~s/\\//g;
+					$score_hash{$lines[4]}{'MS2_scan'} = $lines[0];
+					push (@{$score_hash{$lines[4]}{'smiles'}}, $lines[1]);					
+				}
+				close(SCORE);
+				foreach my $pvalue (sort {$b<=>$a} keys %score_hash)
+				{
+					foreach (@{$score_hash{$pvalue}{'smiles'}})
+					{
+						my $smout = $ms_hash_mol->{$scan_missile}->{$mz_missile}->{$_};				
+						my $score_smile = $_;
+						my ($smout_value) = values %{$smout};
+						my @smout_line = split(/\t/,$smout_value);
+											
+						if (!defined($smout_line[5]))
+						{
+								next;
+						}
+						my $scan = basename($smout_line[5]);
+						$scan =~s/.*\/(\d+)\.MS1/$1/;
+						$scan =~s/\.iso//;								
+						print OUTPUT $scan,"\t",$smout_line[2],"\t",$smout_line[3],"\t",$smout_line[4],"\t",$smout_line[7],"\t",basename($score_hash{$pvalue}{'MS2_scan'}),"\t",$smout_line[8],"\t",$smout_line[9],"\t",sprintf("%.6f",$pvalue),"\n";
+						if($besthit==1)
+						{
+							$missile_structure++;
+							print OUTPUTBEST $scan,"\t",$smout_line[2],"\t",$smout_line[3],"\t",$smout_line[4],"\t",$smout_line[7],"\t",basename($score_hash{$pvalue}{'MS2_scan'}),"\t",$smout_line[8],"\t",$smout_line[9],"\t",sprintf("%.6f",$pvalue),"\n";
+							$besthit=0;
+						}
+					}						
+				}
+			}
+			elsif($besthit==1)
+			{
+				foreach my $smile (keys %{$ms_hash_mol->{$scan_missile}->{$mz_missile}})
+				{	
+					my $smout = $ms_hash_mol->{$scan_missile}->{$mz_missile}->{$smile};
+					
+					my ($smout_value) = values %{$smout};
+					my @smout_line = split(/\t/,$smout_value);
+					if (!defined($smout_line[5]))
+					{
+						next;
+					}
+					my $scan = basename($smout_line[5]);
+					$scan =~s/.*\/(\d+)\.MS1/$1/;
+					$scan =~s/\.iso//;						
+					print OUTPUT $scan,"\t",$smout_line[2],"\t",$smout_line[3],"\t",$smout_line[4],"\t",$smout_line[7],"\t","N/A","\t",$smout_line[8],"\t",$smout_line[9],"\t","N/A","\n";
+					if($besthit==1)
+					{
+						print OUTPUTBEST $scan,"\t",$smout_line[2],"\t",$smout_line[3],"\t",$smout_line[4],"\t",$smout_line[7],"\t","N/A","\t",$smout_line[8],"\t",$smout_line[9],"\t","N/A","\n";
+						$besthit=0;
+					}					
+				}
+			}	
+		}			
+	}
+	print "  $missile_structure MISSILE with MS2 matched\n";
+	print LOG "  $missile_structure MISSILE with MS2 matched\n";	
+}
+
+($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst)=localtime(time); 
+print "  JUMPm finished: ";
+print LOG "  JUMPm finished: ";	
+printf "%4d-%02d-%02d %02d:%02d:%02d\n\n",$year+1900,$mon+1,$mday,$hour,$min,$sec;	
+printf LOG "%4d-%02d-%02d %02d:%02d:%02d\n\n",$year+1900,$mon+1,$mday,$hour,$min,$sec;
+
+
+sub summary
+{
+	my $dta_path = shift;
+	my $smout_file = $dta_path . ".smout";
+	my $ms_hash_mol;
+
+	my $missile_file = $dta_path . ".missile";
+	open(MISSILE,">$missile_file");
+	print MISSILE "Scan\tC12 mass\tN15 mass\tC13 mass\tPair score\tC12 Intensity\tFormula\tType\n";
+	open(UNIQUEMISSILE,">$missile_file.unique");
+	print UNIQUEMISSILE "Scan\tC12 mass\tN15 mass\tC13 mass\tPair score\tC12 Intensity\tFormula\tType\n";
+	print "  Generating a summary table containing structural information\n";
+	my @smout = glob("$dta_path/*.smout");
+	foreach (@smout)
+	{
+		print " Reading file: $_ \r";
+		open(FILE,$_);
+		<FILE>;
+		<FILE>;
+		while(<FILE>)
+		{
+			
+			chomp $_;
+			my @data = split(/\t/,$_);
+			my $scan = $data[5];
+			$scan =~s/.*\/(\d+)\.MS1/$1/;
+			$scan =~s/\.iso//;		
+			$scan =~s/\.MS1//;	
+			
+			my $mass = sprintf("%.6f", $data[2]);
+			
+			$ms_hash_mol->{$scan}->{$mass}->{$data[9]}->{'C12'}=$_;
+			$ms_hash_mol->{$scan}->{sprintf("%.6f",$data[3])}->{$data[9]}->{'N15'}=$_;						
+			$ms_hash_mol->{$scan}->{sprintf("%.6f",$data[4])}->{$data[9]}->{'C13'}=$_;									
+		}
+		close(FILE);
+	}
+	print "\n  Generating a summary table containing missiles information\n";
+	my @missile = glob("$dta_path/*.missile");
+	my %uniq_missile;
+	my %normal_missile;
+	my %decoy_missile;
+	my $missile_count = 1;
+	my $normal_count = 1;
+	my $decoy_count = 1;
+	foreach (@missile)
+	{
+		print " Reading file: $_ \r";	
+		open(FILE,$_);
+		<FILE>;
+		<FILE>;
+		while(<FILE>)
+		{
+			chomp $_;
+			my @data = split(/\t/,$_);
+			my $scan = $data[11];
+			
+			$scan =~s/.*\/(\d+)\.MS1/$1/;
+			$scan =~s/\.iso//;
+			$scan =~s/\.MS1//;	
+			
+			my $key = join(":",@data[1..3]);
+			my $score = $data[4];
+
+			
+			print MISSILE $scan,"\t",join("\t",@data[1..4]),"\t",$data[12],"\t",$data[14],"\t",$data[13],"\n";
+			if($data[13] eq "pass")
+			{
+				my $C12_mass = sprintf("%.3f",$data[1]);
+				my $N15_mass = sprintf("%.3f",$data[2]);
+				my $C13_mass = sprintf("%.3f",$data[3]);
+				next if($uniq_missile{$C12_mass}{$N15_mass}{$C13_mass});
+				$missile_count++;
+				print UNIQUEMISSILE $scan,"\t",join("\t",@data[1..4]),"\t",$data[12],"\t",$data[14],"\t",$data[13],"\n";
+				$uniq_missile{$C12_mass}{$N15_mass}{$C13_mass} = 1;
+			}
+			if($data[13] eq "Norm")
+			{
+				my $C12_mass = sprintf("%.3f",$data[1]);
+				my $N15_mass = sprintf("%.3f",$data[2]);
+				my $C13_mass = sprintf("%.3f",$data[3]);
+				next if($normal_missile{$C12_mass}{$N15_mass}{$C13_mass});
+				$normal_count++;
+	
+				$normal_missile{$C12_mass}{$N15_mass}{$C13_mass} = 1;
+			}
+			if($data[13] eq "Decoy")
+			{
+				my $C12_mass = sprintf("%.3f",$data[1]);
+				my $N15_mass = sprintf("%.3f",$data[2]);
+				my $C13_mass = sprintf("%.3f",$data[3]);
+				next if($decoy_missile{$C12_mass}{$N15_mass}{$C13_mass});
+				$decoy_count++;
+				
+				$decoy_missile{$C12_mass}{$N15_mass}{$C13_mass} = 1;
+			}
+			
+		}
+		close(FILE);
+	}
+	
+	my $MISSILE_FDR = sprintf("%.2f",$decoy_count / $normal_count * 100);
+	print "\n  $normal_count targets and $decoy_count decoys were found, with FDR of ${MISSILE_FDR}%\n";	
+	print LOG "  $normal_count targets and $decoy_count decoys were found, with FDR of ${MISSILE_FDR}%\n";
+	print "  $missile_count missiles were found with FDR of ${MISSILE_FDR}%\n";
+	print LOG "  $missile_count missiles were found with FDR of ${MISSILE_FDR}%\n";	
+	return $ms_hash_mol;
+}			
+
+sub calculate_intensity_ratio
+{
+	my $dta_path = shift;
+	my @missile = glob("$dta_path/*.pairs");
+	my %ratio;
+	my %defect;
+	my @NC_int;
+	my @CC_int;
+	my @NC_defect;
+	my @CC_defect;
+	
+	my $math = new Spiders::MathUtils();
+	
+	foreach (@missile)
+	{
+		open(FILE,$_);
+		<FILE>;
+		<FILE>;
+		while(<FILE>)
+		{
+			chomp $_;
+			my @data = split(/\t/,$_);
+			my $nc_defect = ($data[2]-$data[1])/int($data[2]-$data[1]+0.2);
+			my $cc_defect = ($data[3]-$data[1])/int($data[3]-$data[1]+0.2);
+			
+			push(@NC, log($data[6])/log(2);
+			push(@CC, log($data[8])/log(2);
+			push(@NC_defect,$nc_defect);
+			push(@CC_defect,$cc_defect);			
+		}
+		close(FILE);
+	}
+	$ratio{'NC'} = $math->average(\@NC);
+	$ratio{'CC'} = $math->average(\@CC);
+	$ratio{'NC_std'} = $math->stdev(\@NC);
+	$ratio{'CC_std'} = $math->stdev(\@CC);
+
+### 
+	$defect{'NC'}=$math->est_cauchy_dist(\@NC_defect);
+	$defect{'CC'}=$math->est_cauchy_dist(\@CC_defect);
+	
+	return (\%ratio,\%defect);
+}
+
+
+
+
+sub runjobs
+{
+	my ($file_array,$dta_path,$job_name,$ratio) = @_;
+	my $curr_dir = getcwd;
+    my $MAX_PROCESSES = 10;	
+	my $job_num = 400;
+	my $shell = "";
+	if($job_name =~ /pair/)
+	{
+		$shell = "pair_shell.pl"
+	}
+	elsif($job_name =~ /sch/)
+	{
+		$shell = "runsearch_shell.pl"
+	}
+	if($params->{'cluster'} eq '0')
+	{
+		$job_num = $MAX_PROCESSES;
+	}
+	
+	my $dta_num_per_file = 10;
+	my $job_num = int($#$file_array / $dta_num_per_file) + 1;
+	## Set the maximum number of jobs to 4000
+	if ($job_num > 4000) {
+		$job_num = 4000;
+		$dta_num_per_file = int($#$file_array / $job_num) + 1;
+	}	
+	
+	if($params->{'cluster'} eq '0')
+	{
+		$job_num = $MAX_PROCESSES;
+	}
+
+ 
+	for($i = 0; $i < $job_num; $i++)
+	{	
+		if (($i * $dta_num_per_file) > $#$file_array) 
+		{
+			$job_num = $i;
+			last;
+		}	
+		
+		open(JOB,">$dta_path/${job_name}_${i}.sh") || die "can not open the job files\n";
+		my $dta_file_temp="";
+		my $dta_file_temp2="";
+		my @dta_file_arrays=();
+		my $multiple_jobs_num  = 0;
+		for($j=0;$j<$dta_num_per_file;$j++)
+		{
+			if(($i*$dta_num_per_file+$j)<=$#$file_array)
+			{
+				$dta_file_temp .= " $$file_array[$i+$job_num*$j]";
+				$dta_file_temp2 .= " $$file_array[$i+$job_num*$j]";
+				
+				push (@dta_file_arrays,$$file_array[$i+$job_num*$j]);
+			}
+		}
+		if($params->{'Job_Management_System'} eq 'LSF')
+		{
+			print JOB "#BSUB -P prot\n";
+			print JOB "#BSUB -q normal\n";
+			print JOB "#BSUB -eo $dta_path/${job_name}_${i}.e\n";
+			print JOB "#BSUB -oo $dta_path/${job_name}_${i}.o\n";
+			if($job_name =~ /pair/)
+			{
+				foreach (@dta_file_arrays)
+				{
+					print JOB "perl $dta_path/$shell -param $curr_dir/$parameter $_ \n";	
+				}			
+			}
+			else
+			{
+				foreach (@dta_file_arrays)
+				{
+					print JOB "perl $dta_path/$shell -param $curr_dir/$parameter $_ -NC $ratio->{'NC'} -CC $ratio->{'CC'} -NC_std $ratio->{'NC_std'} -CC_std $ratio->{'CC_std'} -NC_defect_loc $defect->{'NC'}->[0] -CC_defect_loc $defect->{'CC_defect'}->[1] -NC_defect_scale $defect->{'NC'}->[0] -CC_defect_scale $defect->{'CC'}->[1]\n";	
+				}
+			}	
+		}
+		elsif($params->{'Job_Management_System'} eq 'SGE')
+		{
+			print JOB "#!/bin/bash\n";
+			print JOB "#\$ -N ${job_name}_${i}\n";
+			print JOB "#\$ -e ${job_name}_${i}.e\n";
+			print JOB "#\$ -o ${job_name}_${i}.o\n";
+			
+			
+			if($job_name =~ /pair/)
+			{
+				foreach (@dta_file_arrays)
+				{
+					print JOB "perl $dta_path/$shell -param $curr_dir/$parameter $_ \n";	
+				}			
+			}
+			else
+			{
+				foreach (@dta_file_arrays)
+				{
+					print JOB "perl $dta_path/$shell -param $curr_dir/$parameter $_ -NC $ratio->{'NC'} -CC $ratio->{'CC'} -NC_std $ratio->{'NC_std'} -CC_std $ratio->{'CC_std'} -NC_defect_loc $defect->{'NC'}->[0] -CC_defect_loc $defect->{'CC_defect'}->[1] -NC_defect_scale $defect->{'NC'}->[0] -CC_defect_scale $defect->{'CC'}->[1]\n";	
+				}
+			}	
+		}
+		else
+		{
+			if($job_name =~ /pair/)
+			{
+				foreach (@dta_file_arrays)
+				{
+					print JOB "perl $dta_path/$shell -param $curr_dir/$parameter $_ \n";	
+				}			
+			}
+			else
+			{
+				foreach (@dta_file_arrays)
+				{
+					print JOB "perl $dta_path/$shell -param $curr_dir/$parameter $_ -NC $ratio->{'NC'} -CC $ratio->{'CC'} -NC_std $ratio->{'NC_std'} -CC_std $ratio->{'CC_std'} -NC_defect_loc $defect->{'NC'}->[0] -CC_defect_loc $defect->{'CC_defect'}->[1] -NC_defect_scale $defect->{'NC'}->[0] -CC_defect_scale $defect->{'CC'}->[1]\n";	
+				}
+			}	
+		}
+		
+		close(JOB);
+	}
+
+	######### running jobs ######################### 
+	my $job_list;
+	if($params->{'cluster'} eq '1')
+	{
+		if($params->{'Job_Management_System'} eq 'LSF')
+		{
+			for(my $i=0;$i<$job_num;$i++)
+			{
+				$command_line = qq(cd $dta_path && bsub <${job_name}_${i}.sh);
+				my $job=qx[$command_line];
+				chomp $job;
+				my $job_id=0;
+				if($job=~/Job \<(\d*)\> is/)
+				{
+					$job_id=$1;
+				}
+				$job_list->{$job_id}=1;
+			}
+		}
+		elsif($params->{'Job_Management_System'} eq 'SGE')
+		{
+
+			for(my $i=0;$i<$job_num;$i++)
+			{
+				my $job_name = "${job_name}_${i}.sh";
+				$command_line = qq(cd $dta_path && qsub -cwd $job_name);
+				my $job=qx[$command_line];
+				chomp $job;
+				my $job_id=0;
+				if($job=~/$job_name \<(\d*)\> is/)
+				{
+					$job_id=$1;
+				}
+				$job_list->{$job_id}=1;
+				my $count = $i+1;
+				print "\r  $count jobs were submitted";				
+			}	
+		}
+
+		print "\n  You submitted $job_num jobs for database search\n";
+		print LOG "\n  You submitted $job_num jobs for database search\n";		
+		Check_Job_stat("${job_name}_",$job_num,$dta_path);		
+	}
+	elsif($params->{'cluster'} eq '0')
+	{
+
+        my $pm = new Parallel::ForkManager($MAX_PROCESSES);
+        for my $i ( 0 .. $MAX_PROCESSES )
+        {
+            $pm->start and next;
+			my $job_name = "${job_name}_${i}.sh";			
+            system("cd $dta_path && sh $job_name >/dev/null 2>&1");
+            $pm->finish; # Terminates the child process
+			print "\r  $i jobs were submitted";					
+        }
+		Check_Job_stat("${job_name}_",$job_num,$dta_path);		
+        $pm->wait_all_children;		
+	}
+}
+
+sub LuchParallelJob{
+	
+	my($FileName,$cmd,$GridType,$outputName,$dta_path)= @_;
+	
+	open(JOB,">$FileName") || die "can not open $FileName\n";
+	if($GridType eq 'LSF')
+	{	
+			print JOB "#BSUB -P prot\n";
+			print JOB "#BSUB -q normal\n";
+			print JOB "#BSUB -M 20000\n";
+			print JOB "#BSUB -R \"rusage[mem=20000]\"\n";			
+			
+			print JOB "#BSUB -eo $dta_path/$outputName.e\n";
+			print JOB "#BSUB -oo $dta_path/$outputName.o\n";
+			print JOB $cmd;		
+			close(JOB);
+			system(qq(bsub <$FileName >/dev/null 2>&1));	
+	}
+	if($GridType eq 'SGE')
+	{
+
+		print JOB "#!/bin/bash\n";
+		print JOB "#\$ \-S /bin/bash\n";  #In our cluster this line is esential for executing some bash commands such as for
+		print JOB "#\$ \-N $outputName\n";
+		print JOB "#\$ \-e $dta_path/$outputName.e\n";
+		print JOB "#\$ \-o $dta_path/$outputName.o\n";
+		print JOB $cmd;
+		close(JOB);
+		system(qq(qsub -cwd -cwd -pe mpi 4 -l mem_free=8G,h_vmem=6G $FileName >/dev/null 2>&1));
+	}
+	if($GridType eq 'PBS')
+	{
+
+		print JOB "#!/bin/bash\n";
+		print JOB "#PBS -N $outputName\n";
+		print JOB "#PBS -e $dta_path/$outputName.e\n"; 
+		print JOB "#PBS -o $dta_path/$outputName.o"; 			
+		print JOB $cmd;
+		close(JOB);
+		system(qq(qsub -cwd $FileName >/dev/null 2>&1));
+	}
+	close(JOB);
+}
+
+	
+sub Check_Job_stat
+{
+	my ($jobs_prefix,$job_num,$dta_path) = @_;
+	$job_info=1;
+    my ($username) = getpwuid($<);
+	my $command_line="";
+	my $dot = ".";
+	while($job_info)
+	{
+		if($params->{'Job_Management_System'} eq 'LSF')
+		{
+			$command_line =  "bjobs -u $username";
+		}
+		elsif($params->{'Job_Management_System'} eq 'SGE')
+		{
+			$command_line =  "qstat -u $username";
+		}
+		my $job_status=qx[$command_line];
+
+		my $job_status=qx{$command_line 2>&1};
+		
+		my @job_status_array=split(/\n/,$job_status);
+	
+		#Consider only the one that we submitted
+		if($params->{'Job_Management_System'} eq 'LSF')
+		{
+			$command_line =  "bjobs -u $username";	
+
+			my $job_status=qx[$command_line];
+			my @job_status_array=split(/\n/,$job_status);
+			my $job_number = $job_num - scalar (@job_status_array) + 1;
+			if(scalar (@job_status_array) == 0)
+			{
+				print "\r  $job_num jobs finished          ";
+			}
+			else
+			{
+				print "\r  $job_number jobs finished          ";
+				sleep(5);
+			}
+			if(scalar(@job_status_array)>0)
+			{
+				$job_info=1;				
+			}
+			else
+			{
+				$job_info=0;		
+			}			
+		}
+		elsif($params->{'Job_Management_System'} eq 'SGE')
+		{
+		
+			@job_status_array = grep(/$jobs_prefix/,@job_status_array);
+			if($job_status=~/No unfinished job found/)
+			{
+				$job_info=0;
+				print "  \n";
+			}
+			elsif((scalar(@job_status_array))==0)
+			{
+				$job_info=0;
+			}
+			elsif($job_status_array[1]=~/PEND/)
+			{
+				print "\r cluster is busy, please be patient!          ";
+				sleep(100);
+			}			
+			elsif($jobs_prefix =~ /sch_/ || $jobs_prefix =~ /resch_/)
+			{
+				my $check_command = "ls -f $dta_path\/\*.smout \| wc -l";
+				my @outfile = glob("$dta_path\/\*.smout");
+
+				my $outfile_num=scalar @outfile;
+
+				print "\r  $outfile_num files have done         ";
+				sleep(30);
+				
+	
+			}
+			elsif($jobs_prefix =~ /frag_/)
+			{
+				if($params->{'Job_Management_System'} eq 'LSF')
+				{	
+					$command_line =  "bjobs -u $username";	
+				}
+				elsif($params->{'Job_Management_System'} eq 'SGE')
+				{
+					$command_line =  "qstat -u $username";			
+				}			
+				my $job_status=qx[$command_line];
+				my @job_status_array=split(/\n/,$job_status);
+				my $job_number = $job_num - scalar (@job_status_array) + 2;
+				if(scalar (@job_status_array) == 0)
+				{
+					print "\r  $job_num jobs finished          ";					
+				}
+				else
+				{
+					print "\r  $job_number jobs finished          ";
+					sleep(30);
+				}
+				if(scalar(@job_status_array)>0)
+				{
+					$job_info=1;				
+				}
+				else
+				{
+					$job_info=0;		
+				}
+			}
+			
+		}
+
+	}
+}
+
+
+
+sub usage {
+
+print <<"EOF";
+	
+################################################################
+#                                                              #
+#       **************************************************     # 
+#       ****                                          ****     # 
+#       ****                 JUMPm                    ****     # 
+#       ****        version 0.15 (Oct 12, 2015)       ****     # 
+#       ****        Xusheng Wang / Junmin Peng        ****     # 
+#       ****         Copyright (C) 2012 - 2013        ****     # 
+#       ****            All rights reserved           ****     # 
+#       ****                                          ****     # 
+#       **************************************************     # 
+#                                                              #
+################################################################
+
+Usage: $progname -p parameterfile rawfile.raw 
+	or
+       $progname -p parameterfile rawfile.mzXML
+	
+EOF
+exit 1;
+}
