@@ -195,12 +195,13 @@ foreach my $raw_file(sort keys %rawfile_hash)
 		print LOG "  Estimating the labeling mix ratio (it takes time and please be patient!)\n";		
 		runjobs(\@dtafiles,$dta_path,"pair_${random}",$ratio,$defect);		
 		($ratio,$defect) = calculate_intensity_ratio($dta_path);
-		print "  Intensity ratio between N15 and C12 is $ratio->{'NC'} \n";
-		print "  Intensity ratio between C13 and C12 is $ratio->{'CC'} \n";
-		print LOG "  Intensity ratio between N15 and C12 is $ratio->{'NC'} \n";
-		print LOG "  Intensity ratio between C13 and C12 is $ratio->{'CC'} \n";
-		print "  Mass defect between N15 and C12 is $defect->{'NC'} \n";
-		print "  Mass defect between C13 and C12 is $defect->{'CC'} \n";
+		my 
+		print "  Intensity ratio between N15 and C12 is 2^{$ratio->{'NC'}} \n";
+		print "  Intensity ratio between C13 and C12 is 2^{$ratio->{'CC'}} \n";
+		print LOG "  Intensity ratio between N15 and C12 is $ratio->{'NC_std'} \n";
+		print LOG "  Intensity ratio between C13 and C12 is $ratio->{'CC_std'} \n";
+		print "  Mass defect between N15 and C12 is $defect->{'NC'}->[0] \n";
+		print "  Mass defect between C13 and C12 is $defect->{'CC'}->[0] \n";
 
 		
 		print "  Searching database (it takes time and please be patient!)\n";
@@ -530,8 +531,8 @@ sub calculate_intensity_ratio
 			my $nc_defect = ($data[2]-$data[1])/int($data[2]-$data[1]+0.2);
 			my $cc_defect = ($data[3]-$data[1])/int($data[3]-$data[1]+0.2);
 			
-			push(@NC, log($data[6])/log(2);
-			push(@CC, log($data[8])/log(2);
+			push(@NC, log($data[5])/log(2);
+			push(@CC, log($data[7])/log(2);
 			push(@NC_defect,$nc_defect);
 			push(@CC_defect,$cc_defect);			
 		}
@@ -554,7 +555,7 @@ sub calculate_intensity_ratio
 
 sub runjobs
 {
-	my ($file_array,$dta_path,$job_name,$ratio) = @_;
+	my ($file_array,$dta_path,$job_name,$ratio,$defect) = @_;
 	my $curr_dir = getcwd;
     my $MAX_PROCESSES = 10;	
 	my $job_num = 400;
